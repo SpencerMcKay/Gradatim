@@ -46,8 +46,8 @@ function countNodes(n) {
 
 // ── Right rail: analysis ────────────────────────────────────────────────────
 function AnalysisPanel({ root, focus, onSelectIdentity, onToggleTask, onOpenIdentity }) {
-  const tasks = window.topTasks(focus, 6);
-  const bot = window.bottlenecks(focus, 6);
+  const tasks = React.useMemo(() => window.topTasks(focus, 6), [focus]);
+  const bot = React.useMemo(() => window.bottlenecks(focus, 6), [focus]);
 
   return (
     <div className="analysis">

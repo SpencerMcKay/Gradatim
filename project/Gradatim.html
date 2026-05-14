@@ -288,10 +288,28 @@
       max-height: calc(100vh - 100px);
       display: block;
     }
-    .viz-slice { cursor: pointer; transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1); transform-origin: center; }
+    /* Segments: dim all when any is hovered; un-dim the one under the cursor.
+       :hover bubbles from .viz-frag up to .viz-segment, so hovering a fragment
+       also un-dims its parent inner-ring slice automatically. */
+    .viz-segment { will-change: opacity; }
+    .viz-svg.is-hovering .viz-segment { opacity: 0.35; transition: opacity 0.12s; }
+    .viz-svg.is-hovering .viz-segment:hover { opacity: 1; }
+
+    /* Scale transform on hover — same values as before. */
+    .viz-slice { cursor: pointer; will-change: transform; transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1); transform-origin: center; }
     .viz-slice:hover { transform: scale(1.018); }
-    .viz-frag { cursor: pointer; transition: transform 0.18s; transform-origin: center; }
+    .viz-frag { cursor: pointer; will-change: transform; transition: transform 0.18s; transform-origin: center; }
     .viz-frag:hover { transform: scale(1.15); }
+
+    /* Hover rim: always in DOM, shown by CSS :hover — no React prop change needed. */
+    .viz-rim { opacity: 0; pointer-events: none; transition: opacity 0.1s; }
+    .viz-slice:hover .viz-rim,
+    .viz-frag:hover .viz-rim { opacity: 1; }
+
+    /* Glow filter: static for high-progress items; override to glow-strong on hover. */
+    .viz-fill.has-glow { filter: url(#glow); }
+    .viz-slice:hover .viz-fill,
+    .viz-frag:hover .viz-fill { filter: url(#glow-strong); }
 
     .viz-core-pct {
       fill: var(--accent-bright);

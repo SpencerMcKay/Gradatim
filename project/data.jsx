@@ -128,7 +128,10 @@ function resolveHue(path) {
   return null;
 }
 
+const _progCache = new WeakMap();
+
 function progressOf(node) {
+  if (_progCache.has(node)) return _progCache.get(node);
   const tasks = node.tasks || [];
   const children = node.children || [];
   const taskMass = tasks.reduce((a, t) => a + t.impact, 0);
@@ -136,8 +139,9 @@ function progressOf(node) {
   const childMass = children.reduce((a, c) => a + c.weight, 0);
   const childScore = children.reduce((a, c) => a + c.weight * progressOf(c), 0);
   const total = taskMass + childMass;
-  if (total === 0) return 0;
-  return (taskScore + childScore) / total;
+  const result = total === 0 ? 0 : (taskScore + childScore) / total;
+  _progCache.set(node, result);
+  return result;
 }
 
 function findById(node, id, path = []) {
