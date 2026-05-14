@@ -42,14 +42,17 @@ function formatTime(d) {
 
 function StatusBar({ root, focus }) {
   const t = useClock();
-  const totalNodes = (function count(n) { return 1 + (n.children || []).reduce((a, c) => a + count(c), 0); })(root);
-  const totalTasks = (function tcount(n) {
-    return (n.tasks || []).length + (n.children || []).reduce((a, c) => a + tcount(c), 0);
-  })(root);
-  const doneTasks = (function dcount(n) {
-    return (n.tasks || []).filter((x) => x.done).length + (n.children || []).reduce((a, c) => a + dcount(c), 0);
-  })(root);
-  const overall = window.progressOf(root);
+  const [totalNodes, totalTasks, doneTasks, overall] = React.useMemo(() => {
+    const totalNodes = (function count(n) { return 1 + (n.children || []).reduce((a, c) => a + count(c), 0); })(root);
+    const totalTasks = (function tcount(n) {
+      return (n.tasks || []).length + (n.children || []).reduce((a, c) => a + tcount(c), 0);
+    })(root);
+    const doneTasks = (function dcount(n) {
+      return (n.tasks || []).filter((x) => x.done).length + (n.children || []).reduce((a, c) => a + dcount(c), 0);
+    })(root);
+    const overall = window.progressOf(root);
+    return [totalNodes, totalTasks, doneTasks, overall];
+  }, [root]);
 
   return (
     <div className="status">

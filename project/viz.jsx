@@ -4,6 +4,12 @@
 //   outer = grandchildren, thin wedges sharing parent's angular span
 //
 // Geometry in a 600×600 viewBox, drawn relative to center (0,0).
+//
+// Performance notes:
+//   - All path geometry is computed once in useMemo([focus]) — never on hover.
+//   - Visual hover effects (dim/glow/rim) are CSS-only: no React re-renders.
+//   - svgRef.current.classList is mutated directly for the is-hovering class.
+//   - Only hoverData state (tooltip text) triggers a React render on hover.
 
 const TAU = Math.PI * 2;
 const toRad = (deg) => (deg * Math.PI) / 180;
@@ -37,9 +43,6 @@ function strokeArc(r, a0, a1) {
   return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
 }
 
-// Map progress (0..1) to a wedge appearance.
-// Lightness ranges from a dim base to bright. Chroma & hue come from CSS vars
-// so the same wedge tints toward whichever accent the user picked.
 function wedgeFill(progress) {
   const L = 0.32 + progress * 0.62;
   return `oklch(${L.toFixed(3)} var(--accent-c) var(--accent-h))`;
@@ -48,35 +51,27 @@ function wedgeOpacity(progress) {
   return 0.20 + progress * 0.80;
 }
 
-function CoreViz({ focus, focusPath, onSelect, pulseSpeed = "med", showFragments = true }) {
-  const [hover, setHover] = React.useState(null);
-  const [hoverKind, setHoverKind] = React.useState(null);
+const RING_IN = 100, RING_OUT = 144;
+const OUTER_IN = 156, OUTER_OUT = 178;
+const CORE_R = 78;
+const GAP_DEG = 2.5;
+const SUB_GAP_DEG = 0.8;
 
+// Pure geometry builder — called only when focus changes.
+function buildSlices(focus) {
   const children = focus.children || [];
   const totalW = children.reduce((a, c) => a + c.weight, 0) || 1;
-  const overall = window.progressOf(focus);
+  const gapDeg = children.length > 1 ? GAP_DEG : 0;
+  const usable = 360 - gapDeg * children.length;
+  let cursor = -90 + gapDeg / 2;
 
-  // Ring radii
-  const ringIn = 100;
-  const ringOut = 144;
-  const outerIn = 156;
-  const outerOut = 178;
-  const coreR = 78;
-
-  const GAP_DEG = children.length > 1 ? 2.5 : 0;
-  const SUB_GAP_DEG = 0.8;
-  const usable = 360 - GAP_DEG * children.length;
-
-  // Inner-ring slice geometry.
-  let cursor = -90 + GAP_DEG / 2;
-  const slices = children.map((c) => {
+  return children.map((c) => {
     const span = (c.weight / totalW) * usable;
     const a0 = cursor;
     const a1 = cursor + span;
-    cursor = a1 + GAP_DEG;
+    cursor = a1 + gapDeg;
     const prog = window.progressOf(c);
 
-    // Grandchild sub-wedges share this slice's angular range.
     const gcs = c.children || [];
     const gcTotalW = gcs.reduce((a, g) => a + g.weight, 0) || 1;
     const gcGapCount = Math.max(0, gcs.length - 1);
@@ -87,31 +82,60 @@ function CoreViz({ focus, focusPath, onSelect, pulseSpeed = "med", showFragments
       const g0 = gcCursor;
       const g1 = gcCursor + gSpan;
       gcCursor = g1 + SUB_GAP_DEG;
-      return { node: g, a0: g0, a1: g1, prog: window.progressOf(g) };
+      const gProg = window.progressOf(g);
+      return {
+        node: g, a0: g0, a1: g1, prog: gProg,
+        fill: wedgeFill(gProg),
+        opacity: wedgeOpacity(gProg),
+        path: ringArc(OUTER_IN, OUTER_OUT, g0, g1),
+        strokePath: strokeArc(OUTER_OUT + 3, g0, g1),
+        hasGlow: gProg > 0.5,
+      };
     });
 
-    return { node: c, a0, a1, prog, mid: (a0 + a1) / 2, span, gcSlices };
+    return {
+      node: c, a0, a1, prog,
+      fill: wedgeFill(prog),
+      opacity: wedgeOpacity(prog),
+      path: ringArc(RING_IN, RING_OUT, a0, a1),
+      strokePath: strokeArc(RING_OUT + 4, a0, a1),
+      hasGlow: prog > 0.4,
+      gcSlices,
+    };
   });
+}
 
-  // Hover resolution.
-  let hoverNode = null, hoverParent = null, hoverProg = null;
-  if (hover) {
-    const slice = slices.find((s) => s.node.id === hover);
-    if (slice) { hoverNode = slice.node; hoverProg = slice.prog; }
-    else {
-      for (const s of slices) {
-        const g = s.gcSlices.find((gs) => gs.node.id === hover);
-        if (g) { hoverNode = g.node; hoverParent = s.node; hoverProg = g.prog; break; }
-      }
-    }
-  }
+function CoreViz({ focus, focusPath, onSelect, pulseSpeed = "med", showFragments = true }) {
+  const svgRef = React.useRef(null);
+  // hoverData drives only the tooltip — all visual effects are CSS-only.
+  const [hoverData, setHoverData] = React.useState(null);
+
+  // Geometry recomputes only when focus changes, never on hover.
+  const slices = React.useMemo(() => buildSlices(focus), [focus]);
+  const overall = React.useMemo(() => window.progressOf(focus), [focus]);
 
   const pulseDur = { slow: "5.4s", med: "3.6s", fast: "2.2s" }[pulseSpeed] || "3.6s";
 
+  // Mutate the SVG class directly — no React render needed for the dim effect.
+  const handleSliceEnter = React.useCallback((s) => {
+    svgRef.current?.classList.add("is-hovering");
+    setHoverData({ node: s.node, prog: s.prog, parent: null });
+  }, []);
+
+  const handleFragEnter = React.useCallback((g, parentNode) => {
+    svgRef.current?.classList.add("is-hovering");
+    setHoverData({ node: g.node, prog: g.prog, parent: parentNode });
+  }, []);
+
+  const handleLeave = React.useCallback(() => {
+    svgRef.current?.classList.remove("is-hovering");
+    setHoverData(null);
+  }, []);
+
   return (
     <div className="viz-wrap" style={{ "--pulse-dur": pulseDur }}
-         onMouseLeave={() => { setHover(null); setHoverKind(null); }}>
-      <svg viewBox="-220 -220 440 440" className="viz-svg" role="img" aria-label="identity core">
+         onMouseLeave={handleLeave}>
+      <svg ref={svgRef} viewBox="-220 -220 440 440" className="viz-svg" role="img" aria-label="identity core">
         <defs>
           <radialGradient id="g-core" cx="0.5" cy="0.5" r="0.5">
             <stop offset="0%" stopColor="oklch(0.94 var(--accent-c) var(--accent-h))" stopOpacity="0.45" />
@@ -134,74 +158,57 @@ function CoreViz({ focus, focusPath, onSelect, pulseSpeed = "med", showFragments
         </defs>
 
         {/* Halo */}
-        <circle r={outerOut + 30} fill="url(#g-halo)" className="viz-pulse" />
+        <circle r={OUTER_OUT + 30} fill="url(#g-halo)" className="viz-pulse" />
 
-        {/* Inner-ring wedges (direct children) */}
-        {slices.map((s) => {
-          const isHover = hover === s.node.id;
-          const isParentOfHover = hoverParent && hoverParent.id === s.node.id;
-          const anyHover = hover != null;
-          const dim = anyHover && !isHover && !isParentOfHover;
-          const fill = wedgeFill(s.prog);
-          const op = wedgeOpacity(s.prog) * (dim ? 0.30 : 1) * (isHover ? 1.05 : 1);
-          return (
-            <g key={s.node.id} className="viz-slice"
-               onMouseEnter={() => { setHover(s.node.id); setHoverKind("slice"); }}
+        {/*
+          Each .viz-segment groups an inner slice + its outer fragments.
+          CSS uses `.viz-svg.is-hovering .viz-segment { opacity: 0.35 }` to dim all,
+          then `.viz-svg.is-hovering .viz-segment:hover { opacity: 1 }` to un-dim
+          whichever segment the cursor is over — including when hovering a fragment
+          (the :hover bubbles up to the parent .viz-segment).
+        */}
+        {slices.map((s) => (
+          <g key={s.node.id} className="viz-segment">
+            {/* Inner-ring wedge */}
+            <g className="viz-slice"
+               onMouseEnter={() => handleSliceEnter(s)}
                onClick={() => onSelect(s.node.id)}>
-              {/* Wedge track (very faint background so empty wedges still read) */}
-              <path d={ringArc(ringIn, ringOut, s.a0, s.a1)}
-                    fill="oklch(0.30 0 0)" fillOpacity={dim ? 0.04 : 0.10} />
-              {/* Filled wedge — color + opacity encode progress */}
-              <path d={ringArc(ringIn, ringOut, s.a0, s.a1)}
-                    fill={fill} fillOpacity={op}
-                    filter={isHover ? "url(#glow-strong)" : (s.prog > 0.4 ? "url(#glow)" : undefined)} />
-              {/* Hover rim */}
-              {isHover && (
-                <path d={strokeArc(ringOut + 4, s.a0, s.a1)}
-                      stroke="oklch(0.96 var(--accent-c) var(--accent-h))" strokeOpacity="0.85"
-                      strokeWidth="1.2" fill="none" />
-              )}
+              <path d={s.path} fill="oklch(0.30 0 0)" fillOpacity="0.10" />
+              <path d={s.path} fill={s.fill} fillOpacity={s.opacity}
+                    className={s.hasGlow ? "viz-fill has-glow" : "viz-fill"} />
+              {/* Rim: always in DOM, shown/hidden by CSS :hover */}
+              <path d={s.strokePath}
+                    stroke="oklch(0.96 var(--accent-c) var(--accent-h))" strokeOpacity="0.85"
+                    strokeWidth="1.2" fill="none" className="viz-rim" />
             </g>
-          );
-        })}
 
-        {/* Outer-ring wedges (grandchildren) — thinner, share parent angles */}
-        {showFragments && slices.map((s) => s.gcSlices.map((g) => {
-          const isHover = hover === g.node.id;
-          const isParentHover = hover === s.node.id && hoverKind === "slice";
-          const anyHover = hover != null;
-          const dim = anyHover && !isHover && !isParentHover;
-          const fill = wedgeFill(g.prog);
-          const op = wedgeOpacity(g.prog) * (dim ? 0.28 : 1) * (isHover ? 1.05 : 1);
-          return (
-            <g key={`${s.node.id}-${g.node.id}`} className="viz-frag"
-               onMouseEnter={(e) => { e.stopPropagation(); setHover(g.node.id); setHoverKind("frag"); }}
-               onClick={(e) => { e.stopPropagation(); onSelect(g.node.id); }}>
-              <path d={ringArc(outerIn, outerOut, g.a0, g.a1)}
-                    fill="oklch(0.30 0 0)" fillOpacity={dim ? 0.03 : 0.08} />
-              <path d={ringArc(outerIn, outerOut, g.a0, g.a1)}
-                    fill={fill} fillOpacity={op}
-                    filter={isHover ? "url(#glow-strong)" : (g.prog > 0.5 ? "url(#glow)" : undefined)} />
-              {isHover && (
-                <path d={strokeArc(outerOut + 3, g.a0, g.a1)}
+            {/* Outer-ring fragments (grandchildren) */}
+            {showFragments && s.gcSlices.map((g) => (
+              <g key={g.node.id} className="viz-frag"
+                 onMouseEnter={(e) => { e.stopPropagation(); handleFragEnter(g, s.node); }}
+                 onClick={(e) => { e.stopPropagation(); onSelect(g.node.id); }}>
+                <path d={g.path} fill="oklch(0.30 0 0)" fillOpacity="0.08" />
+                <path d={g.path} fill={g.fill} fillOpacity={g.opacity}
+                      className={g.hasGlow ? "viz-fill has-glow" : "viz-fill"} />
+                <path d={g.strokePath}
                       stroke="oklch(0.96 var(--accent-c) var(--accent-h))" strokeOpacity="0.85"
-                      strokeWidth="1" fill="none" />
-              )}
-            </g>
-          );
-        }))}
+                      strokeWidth="1" fill="none" className="viz-rim" />
+              </g>
+            ))}
+          </g>
+        ))}
 
         {/* Core */}
-        <circle r={coreR + 22} fill="url(#g-core)" className="viz-pulse-strong" />
-        <circle r={coreR} fill="var(--bg-2)"
+        <circle r={CORE_R + 22} fill="url(#g-core)" className="viz-pulse-strong" />
+        <circle r={CORE_R} fill="var(--bg-2)"
                 stroke="oklch(0.70 var(--accent-c) var(--accent-h))" strokeOpacity="0.5" strokeWidth="0.8" />
-        <circle r={coreR - 2}
+        <circle r={CORE_R - 2}
                 fill={wedgeFill(overall)} fillOpacity={0.04 + overall * 0.16}
                 className="viz-pulse" />
-        <circle r={coreR} fill="none"
+        <circle r={CORE_R} fill="none"
                 stroke={wedgeFill(Math.max(0.6, overall))} strokeOpacity="0.7"
                 strokeWidth="1.4"
-                strokeDasharray={`${(overall * TAU * coreR).toFixed(1)} ${(TAU * coreR).toFixed(1)}`}
+                strokeDasharray={`${(overall * TAU * CORE_R).toFixed(1)} ${(TAU * CORE_R).toFixed(1)}`}
                 transform="rotate(-90)"
                 filter="url(#glow)" />
 
@@ -213,17 +220,17 @@ function CoreViz({ focus, focusPath, onSelect, pulseSpeed = "med", showFragments
         </text>
       </svg>
 
-      <div className={`viz-hover ${hoverNode ? "is-on" : ""}`}>
-        {hoverNode ? (
+      <div className={`viz-hover ${hoverData ? "is-on" : ""}`}>
+        {hoverData ? (
           <>
-            <div className="viz-hover-name">{hoverNode.name}</div>
+            <div className="viz-hover-name">{hoverData.node.name}</div>
             <div className="viz-hover-meta">
-              <span className="viz-hover-pct">{(hoverProg * 100).toFixed(1)}%</span>
+              <span className="viz-hover-pct">{(hoverData.prog * 100).toFixed(1)}%</span>
               <span className="viz-hover-sep">·</span>
-              <span>{hoverParent ? `under ${hoverParent.name}` : `weight ${hoverNode.weight}`}</span>
+              <span>{hoverData.parent ? `under ${hoverData.parent.name}` : `weight ${hoverData.node.weight}`}</span>
             </div>
-            {hoverNode.description && (
-              <div className="viz-hover-desc">{hoverNode.description}</div>
+            {hoverData.node.description && (
+              <div className="viz-hover-desc">{hoverData.node.description}</div>
             )}
           </>
         ) : (
